@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+build/
+dist/
+*.spec
+.DS_Store
+
+# Local, machine-specific data (never commit these)
+settings.json
+*.db
+*.log
+tidal_session.json
