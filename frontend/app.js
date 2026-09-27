@@ -212,6 +212,28 @@ async function togglePause() {
   render();
 }
 
+async function dedupePlaylist(provider, playlistId, label) {
+  const serviceName = provider === "spotify" ? "Spotify" : "TIDAL";
+  if (!confirm(`Scan "${label}" on ${serviceName} for duplicate tracks and remove the extra copies (keeping the first copy of each song)? This can't be undone.`)) return;
+  setLoading(true, `Scanning "${label}" for duplicates…`);
+  try {
+    const res = await api.deduplicate_playlist(provider, playlistId, false);
+    if (res.ok) {
+      toast(
+        res.duplicates_found
+          ? `Removed ${res.removed} duplicate track(s) out of ${res.total_tracks} in "${label}"`
+          : `No duplicates found in "${label}" (${res.total_tracks} tracks).`
+      );
+    } else {
+      toast("Dedupe failed: " + res.error, true);
+    }
+  } catch (err) {
+    toast("Dedupe failed: " + err, true);
+  }
+  setLoading(false);
+  await refreshDashboard();
+}
+
 function setLoading(isLoading, message) {
   state.loading = isLoading;
   state.loadingMessage = message || "";
@@ -363,6 +385,8 @@ function renderLinkedRow(pair) {
       <span class="meta">${esc(relativeTime(pair.last_synced_at))}</span>
       <div class="actions">
         <button class="small sync-now" data-pair-id="${pair.id}">Sync now</button>
+        <button class="small ghost dedupe-btn" data-provider="spotify" data-playlist-id="${esc(pair.spotify_playlist_id)}" data-label="${esc(pair.spotify_playlist_name)}" title="Remove duplicate tracks from the Spotify side">Dedupe SP</button>
+        <button class="small ghost dedupe-btn" data-provider="tidal" data-playlist-id="${esc(pair.tidal_playlist_id)}" data-label="${esc(pair.tidal_playlist_name)}" title="Remove duplicate tracks from the TIDAL side">Dedupe TD</button>
         <button class="small danger unlink" data-pair-id="${pair.id}" data-label="${esc(label)}">Unlink</button>
       </div>
     </div>
@@ -396,7 +420,10 @@ function renderUnmatched(playlist, provider) {
   return `
     <div class="mini-row">
       <span class="name" title="${esc(playlist.name)}">${esc(playlist.name)}</span>
-      <button class="small create-other" data-provider="${provider}" data-payload="${payload}">Create on ${other}</button>
+      <div class="actions">
+        <button class="small ghost dedupe-btn" data-provider="${provider}" data-playlist-id="${esc(playlist.id)}" data-label="${esc(playlist.name)}" title="Remove duplicate tracks">Dedupe</button>
+        <button class="small create-other" data-provider="${provider}" data-payload="${payload}">Create on ${other}</button>
+      </div>
     </div>
   `;
 }
@@ -520,6 +547,11 @@ function attachGlobalHandlers() {
       const provider = btn.dataset.provider;
       const direction = provider === "spotify" ? "spotify_to_tidal" : "tidal_to_spotify";
       createOnOtherSide(provider, payload, direction);
+    });
+  });
+  document.querySelectorAll(".dedupe-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      dedupePlaylist(btn.dataset.provider, btn.dataset.playlistId, btn.dataset.label);
     });
   });
 }

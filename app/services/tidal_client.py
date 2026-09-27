@@ -85,6 +85,40 @@ class TidalClient:
         )
         return tracks
 
+    def get_playlist_tracks_with_position(self, playlist_id: str) -> list[tuple[int, Track]]:
+        """Same data as get_playlist_tracks, paired with each track's
+        0-based position -- needed to remove specific duplicate
+        occurrences rather than every copy of a track."""
+        session = self._session()
+        playlist = session.playlist(playlist_id)
+        result = []
+        for i, t in enumerate(playlist.tracks()):
+            track = _to_track(t)
+            if track:
+                result.append((i, track))
+        return result
+
+    def remove_tracks_at_positions(self, playlist_id: str, positions: list[int]) -> None:
+        """Removes tracks at exact 0-based indices, highest first, so
+        removing one doesn't shift the index of another we still need
+        to remove."""
+        session = self._session()
+        playlist = session.playlist(playlist_id)
+        removed = 0
+        for pos in sorted(set(positions), reverse=True):
+            try:
+                playlist.remove_by_index(pos)
+                removed += 1
+            except AttributeError:
+                log.warning(
+                    "TIDAL: remove_by_index() not available in this tidalapi version -- "
+                    "skipping position %d (upgrade tidalapi to use duplicate removal on TIDAL)",
+                    pos,
+                )
+            except Exception as exc:
+                log.warning("TIDAL playlist %s: could not remove position %d: %s", playlist_id, pos, exc)
+        log.info("TIDAL playlist %s: removed %d/%d duplicate occurrence(s)", playlist_id, removed, len(positions))
+
     def create_playlist(self, name: str, description: str = "") -> PlaylistRef:
         session = self._session()
         playlist = session.user.create_playlist(name, description)

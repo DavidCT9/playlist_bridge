@@ -24,7 +24,7 @@ import logging
 
 from app import db
 from app.models import DiffResult, PlaylistRef, SyncResult, Track
-from app.sync.matcher import find_best_playlist_name_match, find_match
+from app.sync.matcher import find_best_playlist_name_match, find_duplicates, find_match
 
 log = logging.getLogger(__name__)
 
@@ -97,7 +97,7 @@ class SyncEngine:
         return find_match(track, candidates)
 
     def sync_pair(self, pair: dict, dry_run: bool = False) -> SyncResult:
-        started = dt.datetime.utcnow().isoformat()
+        started = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None).isoformat()
         result = SyncResult(pair_id=pair["id"], dry_run=dry_run)
         pair_label = f"{pair.get('spotify_playlist_name')!r} <-> {pair.get('tidal_playlist_name')!r}"
 
@@ -121,7 +121,7 @@ class SyncEngine:
         except Exception as exc:
             log.exception("Pair #%s: failed to read playlists", pair["id"])
             result.errors.append(f"Could not read playlists: {exc}")
-            db.record_sync(pair["id"], started, dt.datetime.utcnow().isoformat(), 0, 0, 0, "error", str(exc))
+            db.record_sync(pair["id"], started, dt.datetime.now(dt.timezone.utc).replace(tzinfo=None).isoformat(), 0, 0, 0, "error", str(exc))
             return result
 
         log.info(
@@ -159,7 +159,7 @@ class SyncEngine:
                 pair["id"], result.added, result.removed, result.skipped,
             )
             db.record_sync(
-                pair["id"], started, dt.datetime.utcnow().isoformat(),
+                pair["id"], started, dt.datetime.now(dt.timezone.utc).replace(tzinfo=None).isoformat(),
                 result.added, result.removed, result.skipped, "dry_run", "",
             )
             return result
@@ -177,9 +177,9 @@ class SyncEngine:
                 self.clients[dest_name].remove_tracks(dest_playlist_id, uris)
                 result.removed = len(diff.to_remove)
 
-            db.update_pair(pair["id"], last_synced_at=dt.datetime.utcnow().isoformat())
+            db.update_pair(pair["id"], last_synced_at=dt.datetime.now(dt.timezone.utc).replace(tzinfo=None).isoformat())
             db.record_sync(
-                pair["id"], started, dt.datetime.utcnow().isoformat(),
+                pair["id"], started, dt.datetime.now(dt.timezone.utc).replace(tzinfo=None).isoformat(),
                 result.added, result.removed, result.skipped, "success", "",
             )
             log.info(
@@ -190,7 +190,7 @@ class SyncEngine:
             log.exception("Pair #%s: applying changes failed", pair["id"])
             result.errors.append(str(exc))
             db.record_sync(
-                pair["id"], started, dt.datetime.utcnow().isoformat(),
+                pair["id"], started, dt.datetime.now(dt.timezone.utc).replace(tzinfo=None).isoformat(),
                 result.added, result.removed, result.skipped, "error", str(exc),
             )
 
@@ -214,3 +214,40 @@ class SyncEngine:
             total_added, total_removed, total_errors, len(pairs),
         )
         return results
+
+    # ---- duplicate removal -----------------------------------------------
+
+    def deduplicate_playlist(self, provider: str, playlist_id: str, dry_run: bool = False) -> dict:
+        """Scans one playlist on one service for duplicate tracks (same
+        ISRC, or a confident fuzzy title/artist/duration match) and
+        removes every occurrence after the first. Never touches the
+        other service."""
+        client = self.clients[provider]
+        log.info("Dedup: scanning %s playlist %s...", provider, playlist_id)
+        tracks_with_pos = client.get_playlist_tracks_with_position(playlist_id)
+        duplicates = find_duplicates(tracks_with_pos)
+        log.info(
+            "Dedup: %s playlist %s -- %d duplicate occurrence(s) out of %d total track(s)",
+            provider, playlist_id, len(duplicates), len(tracks_with_pos),
+        )
+
+        if dry_run or not duplicates:
+            return {
+                "total_tracks": len(tracks_with_pos),
+                "duplicates_found": len(duplicates),
+                "removed": len(duplicates) if dry_run else 0,
+                "dry_run": dry_run,
+            }
+
+        if provider == "spotify":
+            pairs = [(t.uri or t.id, pos) for pos, t in duplicates]
+            client.remove_tracks_at_positions(playlist_id, pairs)
+        else:
+            client.remove_tracks_at_positions(playlist_id, [pos for pos, _t in duplicates])
+
+        return {
+            "total_tracks": len(tracks_with_pos),
+            "duplicates_found": len(duplicates),
+            "removed": len(duplicates),
+            "dry_run": dry_run,
+        }

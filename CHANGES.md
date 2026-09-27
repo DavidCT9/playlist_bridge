@@ -1,3 +1,86 @@
+# QA pass — 2026-09-27 (round 3)
+
+Added a real, executable test suite (123 tests: 98 Python + 25 JS -- see
+`TESTING.md`) and used it to find and fix two more small issues that
+manual review alone hadn't caught:
+
+- **`datetime.utcnow()` is deprecated in Python 3.12+.** Still worked,
+  but printed a `DeprecationWarning` on every sync. Replaced with the
+  officially-recommended equivalent (`datetime.now(timezone.utc)`, then
+  stripped back to naive UTC) in `db.py` and `engine.py` -- produces the
+  *exact same* stored string format, so this doesn't touch your existing
+  database rows or the frontend's date parsing.
+- **Re-verified every `tidalapi` method actually used** (`session.playlist()`,
+  `playlist.add()`, `.remove_by_id()`, `.remove_by_index()`,
+  `.tracks()`, `user.create_playlist()`, `login_oauth_simple()`,
+  `login_session_file()`) against real source/changelog evidence, not
+  just search snippets as before -- all confirmed correct.
+- No sync-breaking bugs found this round; the fixes above are
+  robustness/hygiene, not behavior changes.
+
+See `TESTING.md` for what's covered, what isn't (and can't be without
+live accounts), and how to run it yourself.
+
+---
+
+# Fixes applied — 2026-09-24 (round 2)
+
+## Root cause of "detects playlists but doesn't add songs"
+
+My previous fix made `get_playlist_tracks()` request **both** `track(...)`
+and `item(...)` in the same Spotify `fields` filter, as a defensive hedge.
+That was the bug. Evidence: your pasted log's `INFO app.services.spotify_client`
+lines only exist in that fix's code, and every sync in that log window
+completed with status `success` and `+0 -0` -- no error, just an empty diff.
+Spotify's `fields` filter can silently return `{}` for a whole nested object
+when part of the filter no longer matches the schema, instead of erroring.
+An empty list compared to an empty list looks like "already in sync" to the
+diff engine -- which is exactly what you saw. Meanwhile `list_playlists()`
+(used for discovery) never used a `fields` filter, which is why playlist
+*discovery* kept working the whole time while track-level sync silently did
+nothing.
+
+**Fix:** `get_playlist_tracks()` now fetches full, unfiltered objects and
+parses `item` (falling back to `track`) in Python, removing the fields-filter
+guesswork entirely. It also logs the raw key shape of the first entry once
+per call, so if this diagnosis is somehow still wrong, your next log capture
+will show conclusively what Spotify is actually sending, rather than another
+round of guessing.
+
+## New: duplicate-track removal
+
+Added a proper "Dedupe" action, available per-side on every linked pair and
+on every unmatched playlist. It:
+- Fetches the playlist with each track's exact position.
+- Groups tracks by ISRC (or the same fuzzy title/artist/duration match used
+  for cross-service sync) to find duplicates, always keeping the *first*
+  occurrence of each song.
+- Removes only the extra occurrences, **by exact position** -- not by track
+  ID/URI. This matters: Spotify's/TIDAL's plain "remove track X" deletes
+  *every* copy of X, which would be exactly wrong for deduping (it would
+  wipe the song entirely instead of trimming it to one copy). Positions are
+  removed highest-to-lowest so earlier positions stay valid mid-operation.
+
+New methods: `get_playlist_tracks_with_position()` and
+`remove_tracks_at_positions()` on both `SpotifyClient` and `TidalClient`;
+`find_duplicates()` in `matcher.py`; `deduplicate_playlist()` in the sync
+engine and exposed via `api.py`. UI: a "Dedupe" button next to each
+playlist in the Linked and Not-yet-linked sections. It asks for confirmation
+first (it's a real deletion) and reports how many duplicates it removed.
+
+## Please re-run and re-check
+
+1. Run `python3 main.py`, then click **Sync now** on a pair (or **Sync all
+   now**) rather than just watching the dashboard -- the dashboard's
+   auto-refresh every 25s only re-lists playlists, it never syncs by itself.
+2. Watch for the new `first raw entry keys=...` log line for each playlist --
+   paste that back to me if anything still looks wrong, it'll show exactly
+   what Spotify is sending.
+3. If you've made any other local edits, re-upload the project as a zip
+   (I couldn't reach your GitHub repo directly -- see chat for why).
+
+---
+
 # Fixes applied — 2026-09-23
 
 ## Root cause

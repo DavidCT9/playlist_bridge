@@ -178,3 +178,14 @@ class Api:
         if self.scheduler:
             self.scheduler.paused = not self.scheduler.paused
         return {"paused": bool(self.scheduler.paused) if self.scheduler else False}
+
+    # ---- duplicate removal ------------------------------------------------
+
+    def deduplicate_playlist(self, provider: str, playlist_id: str, dry_run: bool = False):
+        log.info("deduplicate_playlist(provider=%s, playlist_id=%s, dry_run=%s) called", provider, playlist_id, dry_run)
+        try:
+            result = self.engine.deduplicate_playlist(provider, playlist_id, dry_run=dry_run)
+            return {"ok": True, **result}
+        except Exception as exc:
+            log.exception("deduplicate_playlist failed")
+            return {"ok": False, "error": str(exc)}

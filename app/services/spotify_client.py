@@ -76,19 +76,25 @@ class SpotifyClient:
     def get_playlist_tracks(self, playlist_id: str) -> list[Track]:
         tracks: list[Track] = []
         skipped = 0
-        # Spotify's Feb 2026 API update renamed each entry's "track" key to
-        # "item" (still sending both during their deprecation window, per
-        # their own migration guide) -- ask for both and parse whichever is
-        # present, so this keeps working whichever one Spotify sends.
-        fields = (
-            "next,items(is_local,track(id,uri,name,duration_ms,artists(name),external_ids,is_local),"
-            "item(id,uri,name,duration_ms,artists(name),external_ids,is_local))"
-        )
-        url = f"/playlists/{playlist_id}/items?limit=100&fields={urllib.parse.quote(fields)}"
+        logged_shape = False
+        # NOTE: deliberately no `fields` filter here. Spotify's fields
+        # filter can silently return {} for a whole nested object when
+        # asked for a sub-key it no longer serves, instead of erroring --
+        # which looks identical to "playlist has 0 tracks" downstream.
+        # Fetching full objects and parsing defensively (item first, then
+        # track) in Python avoids that failure mode entirely.
+        url = f"/playlists/{playlist_id}/items?limit=100"
         while url:
             data = self._request("GET", url)
             entries = data.get("items", [])
             for entry in entries:
+                if not logged_shape:
+                    log.info(
+                        "Spotify playlist %s: first raw entry keys=%s, item-or-track keys=%s",
+                        playlist_id, list(entry.keys()),
+                        list((entry.get("item") or entry.get("track") or {}).keys()),
+                    )
+                    logged_shape = True
                 t = entry.get("item") or entry.get("track")
                 is_local = entry.get("is_local") or (t.get("is_local") if t else False)
                 if not t or is_local or not t.get("id"):
@@ -113,6 +119,53 @@ class SpotifyClient:
             playlist_id, len(tracks), skipped,
         )
         return tracks
+
+    def get_playlist_tracks_with_position(self, playlist_id: str) -> list[tuple[int, Track]]:
+        """Same data as get_playlist_tracks, paired with each track's
+        0-based position in the playlist. Needed to remove specific
+        duplicate occurrences rather than every copy of a track."""
+        result: list[tuple[int, Track]] = []
+        position = 0
+        url = f"/playlists/{playlist_id}/items?limit=100"
+        while url:
+            data = self._request("GET", url)
+            for entry in data.get("items", []):
+                t = entry.get("item") or entry.get("track")
+                is_local = entry.get("is_local") or (t.get("is_local") if t else False)
+                if t and not is_local and t.get("id"):
+                    result.append((
+                        position,
+                        Track(
+                            id=t["id"],
+                            provider="spotify",
+                            title=t.get("name", ""),
+                            artists=[a.get("name", "") for a in t.get("artists", [])],
+                            duration_ms=t.get("duration_ms", 0),
+                            isrc=(t.get("external_ids") or {}).get("isrc"),
+                            uri=t.get("uri"),
+                        ),
+                    ))
+                position += 1  # every slot counts, including skipped/local ones
+            url = data.get("next")
+            if url:
+                url = url.replace(API_BASE, "")
+        return result
+
+    def remove_tracks_at_positions(self, playlist_id: str, uri_positions: list[tuple[str, int]]) -> None:
+        """Removes exact occurrences (uri, position) rather than every
+        copy of a uri. Batches from the highest position down to the
+        lowest -- since positions are computed from the state *before*
+        any removal, working top-down means positions from later
+        batches are never invalidated by earlier ones."""
+        pairs_sorted = sorted(uri_positions, key=lambda p: p[1], reverse=True)
+        for i in range(0, len(pairs_sorted), 100):
+            chunk = pairs_sorted[i : i + 100]
+            by_uri: dict[str, list[int]] = {}
+            for uri, pos in chunk:
+                by_uri.setdefault(uri, []).append(pos)
+            body = {"items": [{"uri": u, "positions": ps} for u, ps in by_uri.items()]}
+            self._request("DELETE", f"/playlists/{playlist_id}/items", json=body)
+        log.info("Spotify playlist %s: removed %d duplicate occurrence(s)", playlist_id, len(pairs_sorted))
 
     def create_playlist(self, name: str, description: str = "") -> PlaylistRef:
         data = self._request(

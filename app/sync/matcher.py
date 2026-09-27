@@ -63,6 +63,22 @@ def find_match(track: Track, candidates: list[Track]) -> Optional[Track]:
     return None
 
 
+def find_duplicates(tracks_with_pos: list[tuple[int, Track]]) -> list[tuple[int, Track]]:
+    """Given a playlist's tracks paired with their positions (in
+    playlist order), returns the (position, track) pairs that are
+    duplicates of an earlier entry -- i.e. the ones to remove to keep
+    exactly one copy of each song. The first occurrence of each song is
+    always kept."""
+    kept: list[Track] = []
+    duplicates: list[tuple[int, Track]] = []
+    for pos, track in tracks_with_pos:
+        if find_match(track, kept) is not None:
+            duplicates.append((pos, track))
+        else:
+            kept.append(track)
+    return duplicates
+
+
 def find_best_playlist_name_match(name: str, candidates: list[str]) -> Optional[str]:
     """Used only to *suggest* pairs the user still has to confirm --
     never to silently link playlists."""

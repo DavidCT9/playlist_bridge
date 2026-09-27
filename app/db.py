@@ -59,7 +59,7 @@ def init_db() -> None:
 def create_pair(**fields) -> int:
     fields.setdefault("direction", "spotify_to_tidal")
     fields.setdefault("auto_sync", 1)
-    fields["created_at"] = dt.datetime.utcnow().isoformat()
+    fields["created_at"] = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None).isoformat()
     columns = ", ".join(fields.keys())
     placeholders = ", ".join("?" for _ in fields)
     with _connect() as conn:
